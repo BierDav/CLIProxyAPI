@@ -5,7 +5,7 @@ set -euo pipefail
 git fetch origin patched
 git checkout --detach origin/patched
 current_revision="$(tr -d '[:space:]' < .custom-upstream-revision)"
-git fetch https://github.com/router-for-me/CLIProxyAPI.git main
+git fetch --no-tags https://github.com/router-for-me/CLIProxyAPI.git main
 latest_revision="$(git rev-parse FETCH_HEAD)"
 echo "Current upstream base: ${current_revision}; upstream main: ${latest_revision}"
 
@@ -14,8 +14,6 @@ if [[ "${latest_revision}" == "${current_revision}" ]]; then
   exit 0
 fi
 
-latest_tag="$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq '.tag_name')"
-git fetch https://github.com/router-for-me/CLIProxyAPI.git "refs/tags/${latest_tag}:refs/tags/${latest_tag}"
 git config user.name "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
@@ -32,6 +30,23 @@ if ! git merge --no-ff --no-commit "${latest_revision}"; then
   exit 1
 fi
 
+# The automation token cannot write workflow files. Keep these changes for a
+# maintainer to review and merge; leave the fork and release refs untouched.
+workflow_paths="$(git diff --cached --name-only -- .github/workflows/)"
+if [[ -n "${workflow_paths}" ]]; then
+  git merge --abort
+  {
+    echo "## Upstream workflow changes need maintainer review"
+    echo "Review and merge upstream ${latest_revision} into patched using the [fork runbook](https://github.com/${GITHUB_REPOSITORY}/blob/patched/docs/custom-fork.md)."
+    echo '```'
+    printf '%s\n' "${workflow_paths}"
+    echo '```'
+  } | tee -a "$GITHUB_STEP_SUMMARY"
+  exit 1
+fi
+
+# Only the release version is needed; do not publish upstream's tag to the fork.
+latest_tag="$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq '.tag_name')"
 printf '%s\n' "${latest_tag}" > .custom-upstream-tag
 printf '%s\n' "${latest_revision}" > .custom-upstream-revision
 git add .custom-upstream-tag .custom-upstream-revision
@@ -47,6 +62,5 @@ while IFS= read -r tag; do
 done < <(git tag -l "${base_ver}-custom.*")
 release_tag="${base_ver}-custom.$((max_n + 1))"
 
-git push origin "refs/tags/${latest_tag}"
 git push origin HEAD:patched
 gh workflow run -R "${GITHUB_REPOSITORY}" custom-release.yml --ref patched -f "release_tag=${release_tag}"
