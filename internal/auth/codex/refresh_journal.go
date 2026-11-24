@@ -127,6 +127,20 @@ func (o *CodexAuth) journal(ctx context.Context) RefreshJournal {
 	return &processRefreshJournal
 }
 
+// JournalRefresh runs a refresh grant of another OAuth provider under the journal
+// bound by WithRefreshJournal, or fallback when none is bound.
+// clientID namespaces the claim, so providers never share a grant key. run must
+// report failures before sending with RefreshPreSendError and ambiguous
+// outcomes with RefreshOutcomeUnknownError; any other error is recorded as a
+// rejection of the grant.
+func JournalRefresh[T any](ctx context.Context, fallback RefreshJournal, clientID, grant string, run func() (T, error), decode func(ojson.Result) (T, error)) (T, error) {
+	journal, ok := ctx.Value(refreshJournalContextKey{}).(RefreshJournal)
+	if !ok || journal == nil {
+		journal = fallback
+	}
+	return journalRefresh(ctx, journal, clientID, grant, run, decode)
+}
+
 // journalRefresh returns a saved successful receipt to late callers. An incomplete
 // claim is deliberately not reclaimed, even after a crash or a storage timeout.
 func journalRefresh[T any](ctx context.Context, journal RefreshJournal, clientID, grant string, run func() (T, error), decode func(ojson.Result) (T, error)) (T, error) {
@@ -275,6 +289,10 @@ type memoryRefreshJournal struct {
 
 var processRefreshJournal memoryRefreshJournal
 
+// NewMemoryRefreshJournal returns a process-local journal for callers that have
+// no credential store attached.
+func NewMemoryRefreshJournal() RefreshJournal { return &memoryRefreshJournal{} }
+
 func (j *memoryRefreshJournal) RefreshClaim(_ context.Context, key string) (bool, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
@@ -348,10 +366,18 @@ func isTypedPreConnectRefreshError(err error) bool {
 	return errors.As(err, &opErr) && opErr != nil && opErr.Op == "dial"
 }
 
-// doRefreshRequest forbids 307/308 redirects from silently replaying a POST body
+func (o *CodexAuth) doRefreshRequest(req *http.Request) (*http.Response, error) {
+	var client *http.Client
+	if o != nil {
+		client = o.httpClient
+	}
+	return DoRefreshRequest(client, req)
+}
+
+// DoRefreshRequest forbids 307/308 redirects from silently replaying a POST body
 // and classifies errors that occurred strictly before a connection could carry
 // any request bytes.
-func (o *CodexAuth) doRefreshRequest(req *http.Request) (*http.Response, error) {
+func DoRefreshRequest(httpClient *http.Client, req *http.Request) (*http.Response, error) {
 	var sawPreConn, sawConnReady, sawBodyRead atomic.Bool
 	if req != nil {
 		// Prevent net/http.Transport from internally replaying the POST body across connections.
@@ -372,8 +398,8 @@ func (o *CodexAuth) doRefreshRequest(req *http.Request) (*http.Response, error) 
 		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	}
 	var client http.Client
-	if o != nil && o.httpClient != nil {
-		client = *o.httpClient
+	if httpClient != nil {
+		client = *httpClient
 	}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	resp, errDo := client.Do(req)
