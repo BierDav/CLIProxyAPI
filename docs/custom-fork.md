@@ -1,37 +1,40 @@
 # Custom CLIProxyAPI builds
 
-The `patched` branch records the merged upstream commit in
-`.custom-upstream-revision` and the release version in `.custom-upstream-tag`.
-The sync workflow merges source updates and requests a custom release. It
-does not copy upstream tags to the fork; the release workflow publishes its
-own `<version>-custom.<n>` tag and multi-architecture image.
+`patched` is upstream `main` plus the patches listed in `.fork-kit.toml`. Every
+push to `patched` builds and publishes `ghcr.io/bierdav/cliproxyapi:<version>-custom.<n>`
+and a GitHub release (`custom-release.yml`). `<version>` is the newest upstream
+release tag in the merged history.
 
-If the sync job reports a conflict or a change under `.github/workflows/`,
-review that merge as a maintainer. The sync token cannot write workflows, so
-the job aborts before pushing any refs. From a clean, full clone of the fork:
+## Keeping up with upstream
 
-```sh
-git switch patched
-git pull --ff-only origin patched
-git fetch --no-tags https://github.com/router-for-me/CLIProxyAPI.git main
-upstream_revision=$(git rev-parse FETCH_HEAD)
-upstream_tag=$(gh api repos/router-for-me/CLIProxyAPI/releases/latest --jq '.tag_name')
-git merge --no-ff --no-commit "$upstream_revision"
-```
+[fork-kit](https://github.com/BierDav/fork-kit) (`.github/workflows/fork-kit.yml`)
+merges upstream `main` every six hours into the branch `fork-kit/sync` and keeps
+one pull request into `patched` open for it.
 
-Review `git diff --cached -- .github/workflows/`, resolve any conflicts and
-preserve the fork's release and sync workflows. Update the markers for the
-reviewed merge:
+- **Clean merge, green checks, no upstream `.github/` changes:** the PR merges
+  itself, and the push to `patched` releases.
+- **Conflicts:** the PR is labelled `fork-kit:conflict` and lists the
+  conflicting files with the patches they belong to. Resolve them on
+  `fork-kit/sync`: `npx github:BierDav/fork-kit#v0.2.0 resolve`, or GitHub's
+  conflict editor. Then merge the PR yourself.
+- **Upstream changed `.github/`:** nothing is pushed until a human has reviewed
+  the change. Run the fork-kit workflow with `allow-workflow-changes` once you
+  have.
+- **Keeping a PR from merging itself:** add the label `fork-kit:hold`.
 
-```sh
-printf '%s\n' "$upstream_revision" > .custom-upstream-revision
-printf '%s\n' "$upstream_tag" > .custom-upstream-tag
-git add .custom-upstream-revision .custom-upstream-tag
-```
+Required checks on `patched`: `test` (the antigravity translator tests, from
+`custom-release.yml`) and `build` (upstream's `pr-test-build.yml`).
 
-Test the merge with `go test -v ./internal/translator/antigravity/...` and
-`go build -o /tmp/cliproxy-fork-build ./cmd/server`. Commit and push `patched`
-with a maintainer credential that can write workflows. The push starts the
-custom release; verify both build architectures and the published release.
-Dispatch `sync-upstream.yml` on `patched` if the push did not run it, so it
-can verify that the fork is current. The cluster pins its image separately.
+## Repository settings this relies on
+
+- **The GitHub App:** its key is the secret `FORK_KIT_APP_KEY` in the
+  environment `fork-kit`, which only `patched` can deploy to; its ID is the
+  repository variable `FORK_KIT_APP_ID`.
+- **A ruleset on `patched`:** a pull request and the required checks; no force
+  pushes or deletion. Repository admins may bypass it.
+- **Upstream's contributor PR guards are disabled in this fork**
+  (`agents-md-guard.yml`, `pr-path-guard.yml`, `auto-retarget-main-pr-to-dev.yml`).
+  They would close or fail the sync PR whenever upstream touches `AGENTS.md` or
+  `internal/translator/`.
+
+The cluster pins its image separately.

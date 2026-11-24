@@ -3,6 +3,10 @@ name: Build and release custom CLIProxyAPI
 on:
   push:
     branches: [patched]
+  # Tests (never publishing) on pull requests into patched, including
+  # fork-kit's sync PR, which runs upstream's new code.
+  pull_request:
+    branches: [patched]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -15,11 +19,11 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 jobs:
   prepare:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     outputs:
       upstream_tag: ${{ steps.ver.outputs.upstream_tag }}
@@ -37,9 +41,15 @@ jobs:
           owner_lc="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
           echo "image_repo=ghcr.io/${owner_lc}/cliproxyapi" >> "$GITHUB_OUTPUT"
 
-          upstream_tag="$(tr -d '[:space:]' < .custom-upstream-tag)"
+          # The upstream commit this build contains, and the newest upstream
+          # release tag in its history (fork-kit merges upstream main).
+          upstream=https://github.com/router-for-me/CLIProxyAPI.git
+          git fetch --quiet --no-tags "$upstream" main
+          upstream_revision="$(git merge-base HEAD FETCH_HEAD)"
+          git fetch --quiet --no-tags "$upstream" '+refs/tags/v*:refs/tags/v*'
+          upstream_tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' "$upstream_revision")"
           echo "upstream_tag=${upstream_tag}" >> "$GITHUB_OUTPUT"
-          echo "upstream_revision=$(tr -d '[:space:]' < .custom-upstream-revision)" >> "$GITHUB_OUTPUT"
+          echo "upstream_revision=${upstream_revision}" >> "$GITHUB_OUTPUT"
 
           if [[ -n "${{ inputs.release_tag }}" ]]; then
             release_tag="${{ inputs.release_tag }}"
@@ -60,6 +70,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -67,9 +79,13 @@ jobs:
         run: go test -v ./internal/translator/antigravity/...
 
   build:
+    if: github.event_name != 'pull_request'
     needs: [prepare, test]
     name: Build (${{ matrix.suffix }})
     runs-on: ${{ matrix.runs_on }}
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: false
       matrix:
@@ -123,8 +139,12 @@ jobs:
           retention-days: 1
 
   publish:
+    if: github.event_name != 'pull_request'
     needs: [prepare, build]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
         with:
