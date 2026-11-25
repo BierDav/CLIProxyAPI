@@ -214,3 +214,27 @@ jobs:
               --title "${RELEASE_TAG}" \
               --notes "${notes}"
           fi
+
+      # Deploy: dispatch selfhosted-platform's pin-cliproxy-image.yaml on Gitea
+      # with the image just published; it checks the image and pins it. Without
+      # the repository secrets CLIPROXY_DEPLOY_URL and CLIPROXY_DEPLOY_TOKEN
+      # (docs/custom-fork.md) this does nothing.
+      - name: Deploy the image to the cluster
+        env:
+          CLIPROXY_DEPLOY_URL: ${{ secrets.CLIPROXY_DEPLOY_URL }}
+          CLIPROXY_DEPLOY_TOKEN: ${{ secrets.CLIPROXY_DEPLOY_TOKEN }}
+          IMAGE: ${{ needs.prepare.outputs.image_repo }}:${{ needs.prepare.outputs.release_tag }}@${{ steps.manifest.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CLIPROXY_DEPLOY_URL" ] || [ -z "$CLIPROXY_DEPLOY_TOKEN" ]; then
+            echo "No deploy configured"
+            exit 0
+          fi
+          body=$(jq -nc --arg image "$IMAGE" '{ref: "main", inputs: {image: $image}}')
+          curl --fail --silent --show-error --retry 3 --retry-all-errors \
+            -X POST \
+            -H "Authorization: token $CLIPROXY_DEPLOY_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$body" \
+            "$CLIPROXY_DEPLOY_URL" >/dev/null
+          echo "Dispatched the cluster pin of $IMAGE" | tee -a "$GITHUB_STEP_SUMMARY"

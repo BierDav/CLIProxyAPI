@@ -37,4 +37,13 @@ Required checks on `patched`: `test` (the antigravity translator tests, from
   They would close or fail the sync PR whenever upstream touches `AGENTS.md` or
   `internal/translator/`.
 
-The cluster pins its image separately.
+## Deploying
+
+After a release, `custom-release.yml` dispatches selfhosted-platform's
+`pin-cliproxy-image.yaml` on Gitea with the image it published. That workflow
+checks the digest and that the release contains the one deployed now, runs the
+gateway checks with the new binary, and pushes the pin; Argo CD rolls the
+gateway. The repository secrets `CLIPROXY_DEPLOY_URL` (the Gitea dispatch API
+URL) and `CLIPROXY_DEPLOY_TOKEN` (a `cliproxy-image-bot` token that can only
+dispatch that repository's Actions) enable it. To keep a sync from reaching
+production, label its PR `fork-kit:hold`.
