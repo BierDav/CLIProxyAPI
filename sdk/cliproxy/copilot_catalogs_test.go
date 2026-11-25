@@ -314,7 +314,7 @@ func TestCopilotPresetAndAccountIntersectionTracksCatalogReload(t *testing.T) {
 		if got := len(reg.GetModelsForClient(a.ID)); got != len(want) {
 			t.Fatalf("published %d models, want %v", got, want)
 		}
-		for _, id := range []string{gpt, kimi, future, "account-only"} {
+		for _, id := range []string{gpt, kimi, future, "account-only", copilot.FusionModel} {
 			endpoint, allowed := want[id]
 			route, ok := a.ActiveCopilotCatalog(time.Now()).Route(id)
 			if reg.ClientSupportsModel(a.ID, "copilot/"+id) != allowed || ok != allowed || route.Endpoint != endpoint {
@@ -341,14 +341,17 @@ func TestCopilotPresetAndAccountIntersectionTracksCatalogReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.refreshModelRegistrationForAuth(a)
-	check(map[string]string{gpt: copilot.Chat, future: copilot.Messages})
+	// Account models without a preset and Copilot Fusion are served too.
+	account := map[string]string{gpt: copilot.Chat, future: copilot.Messages, "account-only": copilot.Chat, copilot.FusionModel: copilot.Responses}
+	check(account)
 	if route, _ := a.CopilotCatalog.Route(gpt); route.Info.Thinking != nil || route.Info.ContextLength != 1234 || len(route.Info.SupportedInputModalities) != 1 || route.DefaultVerbosity != "" {
 		t.Fatal("preset overrode explicit account capabilities or endpoint")
 	}
+	// Presets only add CLI defaults; the account directory decides what is served.
 	publish([]*registry.ModelInfo{futureInfo, {ID: "account-only"}})
-	check(map[string]string{future: copilot.Messages, "account-only": copilot.Chat})
+	check(account)
 	publish([]*registry.ModelInfo{})
-	check(nil)
+	check(account)
 }
 
 func TestCopilotColdDiscoveryOutcomes(t *testing.T) {

@@ -24,6 +24,11 @@ func (e *CopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, 
 	defer reporter.TrackFailure(ctx, &err)
 	resp, err := e.send(ctx, auth, opts, &prepared, reporter)
 	if err != nil {
+		if err = e.authorizeThroughFusion(ctx, auth, req, opts, &prepared, err); err == nil {
+			resp, err = e.send(ctx, auth, opts, &prepared, reporter)
+		}
+	}
+	if err != nil {
 		return cliproxyexecutor.Response{}, err
 	}
 	defer closeCopilotResponse(resp.Body)
@@ -91,6 +96,11 @@ func (e *CopilotExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.
 	reporter := helps.NewExecutorUsageReporter(ctx, e, thinking.ParseSuffix(req.Model).ModelName, auth)
 	defer reporter.TrackFailure(ctx, &err)
 	resp, err := e.send(ctx, auth, opts, &prepared, reporter)
+	if err != nil {
+		if err = e.authorizeThroughFusion(ctx, auth, req, opts, &prepared, err); err == nil {
+			resp, err = e.send(ctx, auth, opts, &prepared, reporter)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
