@@ -26,3 +26,21 @@ paths = [
   "sdk/cliproxy/auth/conductor_refresh*.go",
 ]
 tests = ["go test ./internal/auth/claude/... ./sdk/cliproxy/auth/..."]
+
+[[patch]]
+id = "copilot-plugin-parity"
+summary = "Copilot: serve every account chat model (picker-hidden and preset-less ones too), discover with the inference integration, and add Copilot Fusion (auto) with Fusion retries for explicit models"
+paths = [
+  "internal/auth/copilot/catalog.go",
+  "internal/auth/copilot/catalog_test.go",
+  "internal/auth/copilot/client.go",
+  "internal/auth/copilot/fusion.go",
+  "internal/runtime/executor/copilot_executor.go",
+  "internal/runtime/executor/copilot_executor_response.go",
+  "internal/runtime/executor/copilot_executor_fusion_test.go",
+  "internal/runtime/executor/helps/copilot_fusion*.go",
+  "sdk/cliproxy/copilot_catalogs_test.go",
+  "sdk/cliproxy/service_copilot_test.go",
+  "sdk/cliproxy/service_copilot_identity_test.go",
+]
+tests = ["go test ./internal/auth/copilot/... ./internal/runtime/executor/helps/... ./sdk/cliproxy/ && go test ./internal/runtime/executor/ -run Copilot"]

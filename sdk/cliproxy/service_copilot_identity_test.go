@@ -52,7 +52,7 @@ func TestCopilotCanonicalSourceSettings(t *testing.T) {
 			if !service.refreshModelRegistrationForAuth(auth) {
 				t.Fatal("failed to publish Copilot catalog")
 			}
-			models := GlobalModelRegistry().GetModelsForClient(auth.ID)
+			models := withoutCopilotFusion(GlobalModelRegistry().GetModelsForClient(auth.ID))
 			if len(models) != 4 {
 				t.Fatalf("published %d models, want original, alias and their prefixed routes", len(models))
 			}

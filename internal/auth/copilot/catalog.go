@@ -152,6 +152,8 @@ func (c *Catalog) SameModels(other *Catalog) bool {
 	return c == other || (c != nil && other != nil && c != PresetCatalog && other != PresetCatalog && reflect.DeepEqual(c.models, other.models))
 }
 
+// Routes lists the presets the account serves, then the account's other chat
+// models and Copilot Fusion once the account directory has been discovered.
 func (c *Catalog) Routes() []Route {
 	if c == nil {
 		return nil
@@ -162,6 +164,21 @@ func (c *Catalog) Routes() []Route {
 			routes = append(routes, route)
 		}
 	}
+	accountOnly := make([]string, 0, len(c.models))
+	for id := range c.models {
+		if id != FusionModel && registry.LookupStaticModelInfoByChannel(id, Provider) == nil {
+			accountOnly = append(accountOnly, id)
+		}
+	}
+	slices.Sort(accountOnly)
+	for _, id := range accountOnly {
+		if route, ok := c.Route(id); ok {
+			routes = append(routes, route)
+		}
+	}
+	if len(c.models) > 0 {
+		routes = append(routes, FusionRoute())
+	}
 	return routes
 }
 
@@ -169,7 +186,33 @@ func (c *Catalog) Route(modelID string) (Route, bool) {
 	if c == nil {
 		return Route{}, false
 	}
-	return c.resolve(registry.LookupStaticModelInfoByChannel(modelID, Provider))
+	if preset := registry.LookupStaticModelInfoByChannel(modelID, Provider); preset != nil {
+		return c.resolve(preset)
+	}
+	if modelID == FusionModel {
+		if len(c.models) == 0 {
+			return Route{}, false
+		}
+		return FusionRoute(), true
+	}
+	// Accounts can serve models without a preset; their directory entry
+	// supplies the capabilities.
+	model, ok := c.models[modelID]
+	if !ok {
+		return Route{}, false
+	}
+	return model.route(&registry.ModelInfo{ID: modelID}, false)
+}
+
+// FusionSelection returns the route for the model Copilot Fusion selected.
+// Fusion can authorize a model the account directory omits; those are served
+// over Responses like the Fusion route itself.
+func (c *Catalog) FusionSelection(modelID string) Route {
+	if route, ok := c.Route(modelID); ok && modelID != FusionModel {
+		return route
+	}
+	route, _ := (Model{ID: modelID, Endpoints: []string{Responses}}).route(&registry.ModelInfo{ID: modelID}, false)
+	return route
 }
 
 // resolve combines a detached preset with the selected account's capabilities.
@@ -215,13 +258,20 @@ type Route struct {
 }
 
 func (m Model) route(info *registry.ModelInfo, cold bool) (Route, bool) {
-	if m.ID == "auto" || (m.Policy.State != "" && m.Policy.State != "enabled") || (m.Picker != nil && !*m.Picker) || (m.Capabilities.Type != "" && m.Capabilities.Type != "chat") {
+	// The picker flag only controls the official clients' model menu: some
+	// plans (student accounts) mark every model hidden, but still serve them.
+	if m.ID == FusionModel || (m.Policy.State != "" && m.Policy.State != "enabled") || (m.Capabilities.Type != "" && m.Capabilities.Type != "chat") {
 		return Route{}, false
 	}
 	profile := compatibility[m.ID]
 	endpoints := m.Endpoints
 	if endpoints == nil && profile.Endpoint != "" {
 		endpoints = []string{profile.Endpoint}
+	}
+	if endpoints == nil && !cold {
+		// Older chat models such as gpt-4o-mini list no endpoints and are
+		// served by Chat Completions.
+		endpoints = []string{Chat}
 	}
 	var route Route
 	for _, endpoint := range []string{profile.Endpoint, Responses, Messages, Chat} {

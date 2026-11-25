@@ -16,12 +16,13 @@ func TestResolveAccountEndpoint(t *testing.T) {
 		{"local preference allowed", `{"id":"claude-fable-5.1","supported_endpoints":["/responses","/v1/messages"]}`, Messages},
 		{"known model field absent", `{"id":"claude-fable-5.1"}`, Messages},
 		{"explicit empty", `{"id":"claude-fable-5.1","supported_endpoints":[]}`, ""},
-		{"upstream-only model", `{"id":"new","supported_endpoints":["/chat/completions","/v1/messages","/responses"]}`, ""},
-		{"unknown model without endpoints", `{"id":"new"}`, ""},
+		{"upstream-only model", `{"id":"new","supported_endpoints":["/chat/completions","/v1/messages","/responses"]}`, Responses},
+		{"unknown model without endpoints uses Chat", `{"id":"new"}`, Chat},
 		{"unsupported protocol", `{"id":"claude-fable-5.1","supported_endpoints":["ws:/responses","/interactions"]}`, ""},
 		{"not authorized", `{"id":"claude-fable-5.1","policy":{"state":"disabled"}}`, ""},
-		{"hidden despite enabled policy", `{"id":"claude-opus-5","model_picker_enabled":false,"policy":{"state":"enabled"}}`, ""},
-		{"automatic selection is not a concrete model", `{"id":"auto","supported_endpoints":["/responses"]}`, ""},
+		{"served although hidden from the picker", `{"id":"claude-opus-5","model_picker_enabled":false,"policy":{"state":"enabled"}}`, Messages},
+		{"automatic selection is Copilot Fusion", `{"id":"auto","supported_endpoints":["/responses"]}`, Responses},
+		{"non-chat model", `{"id":"text-embedding-3-small","capabilities":{"type":"embeddings"}}`, ""},
 		{"unconfigured", `{"id":"claude-fable-5.1","policy":{"state":"unconfigured"}}`, ""},
 		{"MAI Code 2 prefers Responses", `{"id":"mai-code-2","supported_endpoints":["/chat/completions","/responses"],"policy":{"state":"enabled"}}`, Responses},
 		{"MAI Code 2 Flash falls back to local profile", `{"id":"mai-code-2-flash","policy":{"state":"enabled"}}`, Responses},
@@ -98,5 +99,55 @@ func TestTokenTrustedEndpoint(t *testing.T) {
 		if _, err := token.API(); err == nil {
 			t.Fatalf("accepted endpoint %q", bad)
 		}
+	}
+}
+
+func TestAccountCatalogRoutes(t *testing.T) {
+	var models []Model
+	for _, entry := range []string{
+		`{"id":"gpt-5.4-nano","model_picker_enabled":false,"supported_endpoints":["/responses","ws:/responses"],"capabilities":{"type":"chat"}}`,
+		`{"id":"gpt-4o-mini","name":"GPT-4o mini","capabilities":{"type":"chat","limits":{"max_context_window_tokens":128000}}}`,
+		`{"id":"gpt-6.1-sol","policy":{"state":"disabled"},"supported_endpoints":["/responses"]}`,
+		`{"id":"text-embedding-3-small","capabilities":{"type":"embeddings"}}`,
+		`{"id":"gpt-6-luna-decisions","capabilities":{"type":"decisions"},"supported_endpoints":["/v1/decisions"]}`,
+	} {
+		var model Model
+		if err := json.Unmarshal([]byte(entry), &model); err != nil {
+			t.Fatal(err)
+		}
+		models = append(models, model)
+	}
+	routes := NewCatalog(models, time.Now()).Routes()
+	got := map[string]string{}
+	for _, route := range routes {
+		got[route.Info.ID] = route.Endpoint
+	}
+	want := map[string]string{"gpt-5.4-nano": Responses, "gpt-4o-mini": Chat, FusionModel: Responses}
+	if len(got) != len(want) {
+		t.Fatalf("routes = %v, want %v", got, want)
+	}
+	for id, endpoint := range want {
+		if got[id] != endpoint {
+			t.Fatalf("routes = %v, want %v", got, want)
+		}
+	}
+	mini, _ := NewCatalog(models, time.Now()).Route("gpt-4o-mini")
+	if mini.Info.DisplayName != "GPT-4o mini" || mini.Info.ContextLength != 128000 || mini.Info.Type != Provider {
+		t.Fatalf("account-only route lost directory capabilities: %+v", mini.Info)
+	}
+	for _, catalog := range []*Catalog{PresetCatalog, UnavailableCatalog, NewCatalog(nil, time.Now())} {
+		if _, ok := catalog.Route(FusionModel); ok {
+			t.Fatal("Copilot Fusion was published before the account directory was discovered")
+		}
+	}
+}
+
+func TestFusionSelection(t *testing.T) {
+	catalog := NewCatalog([]Model{{ID: "mai-code-2-flash", Endpoints: []string{Chat}}}, time.Now())
+	if route := catalog.FusionSelection("gpt-6-luna"); route.Endpoint != Responses || route.Info.ID != "gpt-6-luna" {
+		t.Fatalf("model outside the directory = %+v, want a Responses route", route)
+	}
+	if route := catalog.FusionSelection("mai-code-2-flash"); route.Endpoint != Chat {
+		t.Fatalf("directory model = %+v, want its own route", route)
 	}
 }
