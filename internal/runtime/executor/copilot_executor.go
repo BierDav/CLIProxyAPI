@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -158,6 +159,8 @@ type copilotPreparedRequest struct {
 	responsesCapture    *helps.CopilotResponsesCapture
 	messagesCapture     *helps.CopilotMessagesCapture
 	original, body      []byte
+	// fusionSession authorizes this request through Copilot Fusion.
+	fusionSession string
 }
 
 func (e *CopilotExecutor) prepare(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, stream, countOnly bool) (copilotPreparedRequest, error) {
@@ -178,6 +181,19 @@ func (e *CopilotExecutor) prepare(ctx context.Context, auth *cliproxyauth.Auth, 
 	}
 	if route.Format == "" {
 		return copilotPreparedRequest{}, statusErr{code: http.StatusNotFound, msg: "copilot: no supported endpoint for this model and account"}
+	}
+	var fusionSession string
+	if route.Info.ID == copilot.FusionModel && !countOnly {
+		session, errFusion := e.startFusion(ctx, auth, req.Payload, opts.SourceFormat)
+		if errFusion != nil {
+			return copilotPreparedRequest{}, errFusion
+		}
+		// The planned request format is Responses; the selected model must accept it.
+		selected := resolved.catalog.FusionSelection(session.Model)
+		if selected.Format != route.Format {
+			return copilotPreparedRequest{}, statusErr{code: http.StatusBadGateway, msg: fmt.Sprintf("copilot: Copilot Fusion selected %s, which this account does not serve over Responses", session.Model)}
+		}
+		route, fusionSession = selected, session.Token
 	}
 	baseModel := route.Info.ID
 	from, to := opts.SourceFormat, route.Format
@@ -270,7 +286,51 @@ func (e *CopilotExecutor) prepare(ctx context.Context, auth *cliproxyauth.Auth, 
 	if !countOnly && !stream && to == sdktranslator.FormatClaude && route.NonStreamingOutput > 0 && doc.Get("max_tokens").Int() > int64(route.NonStreamingOutput) {
 		return copilotPreparedRequest{}, statusErr{code: http.StatusBadRequest, msg: fmt.Sprintf("copilot: max_tokens exceeds this model's non-streaming limit of %d; lower max_tokens or enable streaming", route.NonStreamingOutput)}
 	}
-	return copilotPreparedRequest{responseTranslators: responseTranslators, route: route, input: input, original: original, body: doc.Bytes(), messagesCapture: messagesCapture, responsesCapture: responsesCapture}, nil
+	return copilotPreparedRequest{responseTranslators: responseTranslators, route: route, input: input, original: original, body: doc.Bytes(), messagesCapture: messagesCapture, responsesCapture: responsesCapture, fusionSession: fusionSession}, nil
+}
+
+// startFusion opens a Copilot Fusion session for this request's latest prompt.
+func (e *CopilotExecutor) startFusion(ctx context.Context, auth *cliproxyauth.Auth, payload []byte, from sdktranslator.Format) (copilot.FusionSession, error) {
+	base, _ := auth.Metadata["base_url"].(string)
+	token, _ := auth.Metadata["access_token"].(string)
+	if token == "" || !copilot.TrustedAPI(base) {
+		return copilot.FusionSession{}, statusErr{code: http.StatusUnauthorized, msg: "copilot: missing usable credentials"}
+	}
+	prompt, hasImage := helps.CopilotFusionPrompt(payload, from)
+	client := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 30*time.Second)
+	session, err := copilot.StartFusion(ctx, client, base, token, prompt, hasImage)
+	var status copilot.HTTPError
+	if errors.As(err, &status) {
+		return copilot.FusionSession{}, statusErr{code: status.Code, msg: fmt.Sprintf("copilot: Copilot Fusion session request failed with HTTP %d", status.Code)}
+	}
+	return session, err
+}
+
+// authorizeThroughFusion handles GitHub refusing an explicit model with
+// model_not_supported. Some plans (student accounts) may use a model only
+// through Copilot Fusion; when Fusion authorizes the requested model, the
+// request is retried with that session. Fusion never substitutes a different
+// model for an explicit request.
+func (e *CopilotExecutor) authorizeThroughFusion(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, prepared *copilotPreparedRequest, err error) error {
+	var status statusErr
+	if prepared.fusionSession != "" || !errors.As(err, &status) || status.code != http.StatusBadRequest ||
+		ojson.GetBytesNoCopy([]byte(status.msg), "error.code").String() != "model_not_supported" {
+		return err
+	}
+	session, errFusion := e.startFusion(ctx, auth, req.Payload, opts.SourceFormat)
+	if errFusion != nil {
+		return err
+	}
+	requested := prepared.route.Info.ID
+	if !strings.EqualFold(session.Model, requested) {
+		// "not available for your plan" lets the auth manager cool this model
+		// down for this account and try another credential.
+		doc := ojson.NewDocString(`{"error":{"code":"model_not_available_for_plan","type":"invalid_request_error"}}`)
+		_ = doc.Set("error.message", fmt.Sprintf("Copilot Fusion authorized %s, but %s is not available for your plan on this account. Use copilot/auto to let GitHub choose an available model.", session.Model, requested))
+		return statusErr{code: http.StatusBadRequest, msg: doc.String()}
+	}
+	prepared.fusionSession = session.Token
+	return nil
 }
 
 func (e *CopilotExecutor) send(ctx context.Context, auth *cliproxyauth.Auth, opts cliproxyexecutor.Options, prepared *copilotPreparedRequest, reporter *helps.UsageReporter) (*http.Response, error) {
@@ -294,6 +354,9 @@ func (e *CopilotExecutor) send(ctx context.Context, auth *cliproxyauth.Auth, opt
 	}
 	prepared.turn = e.turns.Resolve(auth.ID, input, opts, prepared.route.Format, wire)
 	helps.SetCopilotInferenceHeaders(httpReq.Header, prepared.route, wire, input.Initiator, prepared.turn)
+	if prepared.fusionSession != "" {
+		copilot.SetFusionHeaders(httpReq.Header, prepared.fusionSession)
+	}
 	reporter.SetUpstreamModel(prepared.route.Info.ID)
 	reporter.SetTranslatedRequestMetadata(prepared.body, prepared.route.Format.String())
 	authorizedReq, errPrepare := e.prepareAuthorizedRequest(ctx, auth, httpReq)

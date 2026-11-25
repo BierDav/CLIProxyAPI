@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/MoeForge/moego/json"
+	"github.com/MoeForge/moego/ojson"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/auth/codex"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
@@ -69,6 +71,17 @@ func resetClaudeRefreshState() {
 	defer claudeRefreshMu.Unlock()
 	claudeRefreshBlock = make(map[string]time.Time)
 	claudeRefreshGroup = singleflight.Group{}
+	claudeRefreshJournal = codex.NewMemoryRefreshJournal()
+}
+
+// claudeRefreshJournal keeps direct SDK callers without a credential store from
+// replaying an unresolved grant within this process.
+var claudeRefreshJournal = codex.NewMemoryRefreshJournal()
+
+func claudeProcessRefreshJournal() codex.RefreshJournal {
+	claudeRefreshMu.Lock()
+	defer claudeRefreshMu.Unlock()
+	return claudeRefreshJournal
 }
 
 func claudeRefreshBlockedUntil(refreshToken string) time.Time {
@@ -527,7 +540,14 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 			return nil, errReadiness
 		}
 		refreshCtx = context.WithValue(refreshCtx, claudeRefreshHandshakeTimeoutContextKey{}, claudeRefreshHandshakeTimeout)
-		return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
+		// Anthropic rotates refresh tokens and revokes the whole grant when a
+		// consumed one is replayed. The journal claims the grant in the
+		// credential store before sending and saves the rotated tokens as a
+		// receipt, so a restarted or failed-over process recovers them instead
+		// of replaying a token whose persistence was lost.
+		return codex.JournalRefresh(refreshCtx, claudeProcessRefreshJournal(), ClientID, refreshToken, func() (*ClaudeTokenData, error) {
+			return o.refreshTokensSingleFlight(refreshCtx, refreshToken)
+		}, decodeClaudeRefreshReceipt)
 	})
 	if err != nil {
 		return nil, err
@@ -539,13 +559,18 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	return tokenData, nil
 }
 
+// refreshTokensSingleFlight classifies every failure for the refresh journal:
+// RefreshPreSendError when no token can have been issued (nothing sent, or a
+// definitive 429/5xx response), RefreshOutcomeUnknownError when Anthropic may
+// have rotated the token but the result was lost, and a plain error for a
+// definitive rejection such as invalid_grant.
 func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken string) (*ClaudeTokenData, error) {
 	if blockedUntil := claudeRefreshBlockedUntil(refreshToken); blockedUntil.After(time.Now()) {
-		return nil, &refreshHTTPError{
+		return nil, &codex.RefreshPreSendError{Stage: "rate-limited", Cause: &refreshHTTPError{
 			status:    http.StatusTooManyRequests,
 			message:   fmt.Sprintf("refresh temporarily blocked until %s", blockedUntil.Format(time.RFC3339)),
 			retryable: false,
-		}
+		}}
 	}
 
 	reqBody := map[string]interface{}{
@@ -557,18 +582,18 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		return nil, &codex.RefreshPreSendError{Stage: "request-encode", Cause: err}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", RefreshTokenURL, strings.NewReader(string(jsonBody)))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create refresh request: %w", err)
+		return nil, &codex.RefreshPreSendError{Stage: "request-create", Cause: err}
 	}
 	applyClaudeOAuthAxiosHeaders(req)
 
-	resp, err := o.httpClient.Do(req)
+	resp, err := codex.DoRefreshRequest(o.httpClient, req)
 	if err != nil {
-		return nil, fmt.Errorf("token refresh request failed: %w", err)
+		return nil, err
 	}
 	defer func() {
 		_ = resp.Body.Close()
@@ -576,7 +601,7 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 
 	body, err := readClaudeOAuthResponseBody(resp)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read refresh response: %w", err)
+		return nil, &codex.RefreshOutcomeUnknownError{Stage: "response-read", Cause: err}
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -584,20 +609,28 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 		if resp.StatusCode == http.StatusTooManyRequests {
 			retryAfter := parseClaudeRetryAfter(resp)
 			setClaudeRefreshBlockedUntil(refreshToken, time.Now().Add(retryAfter))
-			return nil, &refreshHTTPError{status: resp.StatusCode, message: message, retryable: false}
+			return nil, &codex.RefreshPreSendError{Stage: "http-429", Cause: &refreshHTTPError{status: resp.StatusCode, message: message, retryable: false}}
 		}
-		return nil, &refreshHTTPError{
+		errHTTP := &refreshHTTPError{
 			status:    resp.StatusCode,
 			message:   message,
 			retryable: resp.StatusCode >= http.StatusInternalServerError,
 		}
+		if errHTTP.retryable {
+			// A definitive server error issued no token; the grant stays usable.
+			return nil, &codex.RefreshPreSendError{Stage: fmt.Sprintf("http-%d", resp.StatusCode), Cause: errHTTP}
+		}
+		return nil, errHTTP
 	}
 
 	// log.Debugf("Token response: %s", string(body))
 
 	var tokenResp tokenResponse
 	if err = json.Unmarshal(body, &tokenResp); err != nil {
-		return nil, fmt.Errorf("failed to parse token response: %w", err)
+		return nil, &codex.RefreshOutcomeUnknownError{Stage: "response-decode", Cause: err}
+	}
+	if strings.TrimSpace(tokenResp.AccessToken) == "" || tokenResp.ExpiresIn <= 0 {
+		return nil, &codex.RefreshOutcomeUnknownError{Stage: "response-decode"}
 	}
 
 	clearClaudeRefreshBlockedUntil(refreshToken)
@@ -619,6 +652,21 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 	tokenData.OrganizationUUID = profile.Organization.UUID
 	tokenData.OrganizationName = profile.Organization.Name
 	return tokenData, nil
+}
+
+func decodeClaudeRefreshReceipt(value ojson.Result) (*ClaudeTokenData, error) {
+	if !value.IsObject() || value.Get("access_token").String() == "" || value.Get("refresh_token").String() == "" || value.Get("expired").String() == "" {
+		return nil, fmt.Errorf("invalid Claude refresh receipt")
+	}
+	return &ClaudeTokenData{
+		AccessToken:      value.Get("access_token").String(),
+		RefreshToken:     value.Get("refresh_token").String(),
+		Email:            value.Get("email").String(),
+		AccountUUID:      value.Get("account_uuid").String(),
+		OrganizationUUID: value.Get("organization_uuid").String(),
+		OrganizationName: value.Get("organization_name").String(),
+		Expire:           value.Get("expired").String(),
+	}, nil
 }
 
 // CreateTokenStorage creates a new ClaudeTokenStorage from auth bundle and user info.

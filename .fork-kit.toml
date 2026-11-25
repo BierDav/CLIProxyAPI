@@ -1,0 +1,48 @@
+# fork-kit (https://github.com/BierDav/fork-kit) keeps this fork merged with
+# upstream through one sync pull request. See docs/custom-fork.md.
+# The sync runs centrally (BierDav/fork-kit, sync-forks.yml); this repository
+# holds no App key and runs only the guard (.github/workflows/fork-kit.yml).
+
+[upstream]
+url = "https://github.com/router-for-me/CLIProxyAPI.git"
+track = "branch:main"
+
+[fork]
+branch = "patched"
+
+[ledger]
+ignore = [".github/**", "docs/custom-fork.md"]
+
+[[patch]]
+id = "antigravity-function-call-ids"
+summary = "Synthesize missing functionCall IDs for Claude models on Antigravity"
+paths = ["internal/translator/antigravity/**"]
+tests = ["go test ./internal/translator/antigravity/..."]
+
+[[patch]]
+id = "claude-refresh-journal"
+summary = "Journal Claude OAuth refresh grants so a rotated refresh token is never lost"
+paths = [
+  "internal/auth/claude/**",
+  "internal/auth/codex/refresh_journal.go",
+  "sdk/cliproxy/auth/conductor_refresh*.go",
+]
+tests = ["go test ./internal/auth/claude/... ./sdk/cliproxy/auth/..."]
+
+[[patch]]
+id = "copilot-plugin-parity"
+summary = "Copilot: serve every account chat model (picker-hidden and preset-less ones too), discover with the inference integration, and add Copilot Fusion (auto) with Fusion retries for explicit models"
+paths = [
+  "internal/auth/copilot/catalog.go",
+  "internal/auth/copilot/catalog_test.go",
+  "internal/auth/copilot/client.go",
+  "internal/auth/copilot/fusion.go",
+  "internal/runtime/executor/copilot_executor.go",
+  "internal/runtime/executor/copilot_executor_response.go",
+  "internal/runtime/executor/copilot_executor_fusion_test.go",
+  "internal/runtime/executor/helps/copilot_fusion*.go",
+  "sdk/cliproxy/copilot_catalogs_test.go",
+  "sdk/cliproxy/service_copilot_test.go",
+  "sdk/cliproxy/service_copilot_identity_test.go",
+]
+tests = ["go test ./internal/auth/copilot/... ./internal/runtime/executor/helps/... ./sdk/cliproxy/ && go test ./internal/runtime/executor/ -run Copilot"]

@@ -98,7 +98,7 @@ func TestCopilotAccountCatalogRepublishesOnAuthUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	r.reconcile(ctx, time.Now())
-	if models := GlobalModelRegistry().GetModelsForClient(base.ID); len(models) != 1 || models[0].ID != "copilot-test-alias" {
+	if models := withoutCopilotFusion(GlobalModelRegistry().GetModelsForClient(base.ID)); len(models) != 1 || models[0].ID != "copilot-test-alias" {
 		t.Fatalf("update did not publish the account catalog with its alias: %+v", models)
 	}
 	updated = current.Clone()
@@ -181,7 +181,7 @@ oauth:
 	if !service.refreshModelRegistrationForAuth(auth) {
 		t.Fatal("failed to publish Copilot catalog")
 	}
-	registered := reg.GetModelsForClient(auth.ID)
+	registered := withoutCopilotFusion(reg.GetModelsForClient(auth.ID))
 	routedAlias := prefix + "/" + alias
 	publicIDs := []string{prefix + "/" + public, routedAlias}
 	if !forcePrefix {
@@ -392,7 +392,7 @@ func TestCopilotRoutesOnlyPublishedModels(t *testing.T) {
 			if !service.refreshModelRegistrationForAuth(auth) {
 				t.Fatal("failed to publish Copilot catalog")
 			}
-			registered := GlobalModelRegistry().GetModelsForClient(auth.ID)
+			registered := withoutCopilotFusion(GlobalModelRegistry().GetModelsForClient(auth.ID))
 			if len(registered) != len(tc.published) {
 				t.Fatalf("registered %d models, want %v", len(registered), tc.published)
 			}
@@ -458,6 +458,13 @@ func TestCopilotRoutesOnlyPublishedModels(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withoutCopilotFusion drops the Copilot Fusion routes every discovered account publishes.
+func withoutCopilotFusion(models []*ModelInfo) []*ModelInfo {
+	return slices.DeleteFunc(slices.Clone(models), func(model *ModelInfo) bool {
+		return model.MetadataModelID == copilot.FusionModel
+	})
 }
 
 func registerCopilotRoutingTestAuth(t *testing.T, manager *coreauth.Manager, prefix string, modelIDs ...string) *coreauth.Auth {

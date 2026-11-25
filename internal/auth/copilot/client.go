@@ -111,7 +111,9 @@ func RequestJSON(ctx context.Context, client *http.Client, endpoint, bearer stri
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
 	if strings.HasSuffix(endpoint, "/models") {
-		req.Header.Set("Copilot-Integration-Id", "copilot-sdk")
+		// Discover with the integration inference uses: the copilot-sdk
+		// directory omits models, such as gpt-5.4-nano, that it serves.
+		req.Header.Set("Copilot-Integration-Id", "copilot-developer-cli")
 		req.Header.Set("X-GitHub-Api-Version", "2026-09-21")
 	}
 	safeClient := *client
