@@ -1586,7 +1586,7 @@ func (m *Manager) refreshAuthForRequestAtVersion(ctx context.Context, id, failed
 	if exec == nil {
 		return nil, errors.New("auth or executor not found")
 	}
-	if strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+	if provider := strings.TrimSpace(auth.Provider); strings.EqualFold(provider, "codex") || strings.EqualFold(provider, "claude") {
 		if resolver, okResolver := store.(interface {
 			RefreshJournalFor(*Auth) (codex.RefreshJournal, error)
 		}); okResolver {
