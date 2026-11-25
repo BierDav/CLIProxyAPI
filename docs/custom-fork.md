@@ -15,7 +15,7 @@ one pull request into `patched` open for it.
   itself, and the push to `patched` releases.
 - **Conflicts:** the PR is labelled `fork-kit:conflict` and lists the
   conflicting files with the patches they belong to. Resolve them on
-  `fork-kit/sync`: `npx github:BierDav/fork-kit#v0.3.0 resolve`, or GitHub's
+  `fork-kit/sync`: `npx github:BierDav/fork-kit#v0.3.1 resolve`, or GitHub's
   conflict editor. Then merge the PR yourself.
 - **Upstream changed `.github/`:** nothing is pushed until a human has reviewed
   the change. Run the fork-kit workflow with `allow-workflow-changes` once you
